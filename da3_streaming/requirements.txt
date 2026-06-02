@@ -1,4 +1,4 @@
-faiss-gpu
+faiss-gpu-cu12
 pandas
 prettytable
 einops

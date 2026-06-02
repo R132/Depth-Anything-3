@@ -625,74 +625,103 @@ class DA3_Streaming:
 
         print("Apply alignment")
         self.sim3_list = accumulate_sim3_transforms(self.sim3_list)
-        for chunk_idx in range(len(self.chunk_indices) - 1):
-            print(f"Applying {chunk_idx+1} -> {chunk_idx} (Total {len(self.chunk_indices)-1})")
-            s, R, t = self.sim3_list[chunk_idx]
 
-            chunk_data = np.load(
-                os.path.join(self.result_unaligned_dir, f"chunk_{chunk_idx+1}.npy"),
-                allow_pickle=True,
+        # Handle single chunk case: save PLY without alignment
+        if len(self.chunk_indices) == 1:
+            print("Single chunk detected, saving PLY without alignment")
+            chunk_data_first = np.load(
+                os.path.join(self.result_unaligned_dir, "chunk_0.npy"), allow_pickle=True
             ).item()
-
-            aligned_chunk_data = {}
-
-            aligned_chunk_data["world_points"] = depth_to_point_cloud_optimized_torch(
-                chunk_data.depth, chunk_data.intrinsics, chunk_data.extrinsics
+            np.save(os.path.join(self.result_aligned_dir, "chunk_0.npy"), chunk_data_first)
+            points_first = depth_to_point_cloud_vectorized(
+                chunk_data_first.depth,
+                chunk_data_first.intrinsics,
+                chunk_data_first.extrinsics,
             )
-            aligned_chunk_data["world_points"] = apply_sim3_direct_torch(
-                aligned_chunk_data["world_points"], s, R, t
-            )
-
-            aligned_chunk_data["conf"] = chunk_data.conf
-            aligned_chunk_data["images"] = chunk_data.processed_images
-
-            aligned_path = os.path.join(self.result_aligned_dir, f"chunk_{chunk_idx+1}.npy")
-            np.save(aligned_path, aligned_chunk_data)
-
-            if chunk_idx == 0:
-                chunk_data_first = np.load(
-                    os.path.join(self.result_unaligned_dir, "chunk_0.npy"), allow_pickle=True
-                ).item()
-                np.save(os.path.join(self.result_aligned_dir, "chunk_0.npy"), chunk_data_first)
-                points_first = depth_to_point_cloud_vectorized(
-                    chunk_data_first.depth,
-                    chunk_data_first.intrinsics,
-                    chunk_data_first.extrinsics,
-                )
-                colors_first = chunk_data_first.processed_images
-                confs_first = chunk_data_first.conf
-                ply_path_first = os.path.join(self.pcd_dir, "0_pcd.ply")
-                save_confident_pointcloud_batch(
-                    points=points_first,  # shape: (H, W, 3)
-                    colors=colors_first,  # shape: (H, W, 3)
-                    confs=confs_first,  # shape: (H, W)
-                    output_path=ply_path_first,
-                    conf_threshold=np.mean(confs_first)
-                    * self.config["Model"]["Pointcloud_Save"]["conf_threshold_coef"],
-                    sample_ratio=self.config["Model"]["Pointcloud_Save"]["sample_ratio"],
-                )
-                if self.config["Model"]["save_depth_conf_result"]:
-                    predictions = chunk_data_first
-                    self.save_depth_conf_result(predictions, 0, 1, np.eye(3), np.array([0, 0, 0]))
-
-            points = aligned_chunk_data["world_points"].reshape(-1, 3)
-            colors = (aligned_chunk_data["images"].reshape(-1, 3)).astype(np.uint8)
-            confs = aligned_chunk_data["conf"].reshape(-1)
-            ply_path = os.path.join(self.pcd_dir, f"{chunk_idx+1}_pcd.ply")
+            colors_first = chunk_data_first.processed_images
+            confs_first = chunk_data_first.conf
+            ply_path_first = os.path.join(self.pcd_dir, "0_pcd.ply")
             save_confident_pointcloud_batch(
-                points=points,  # shape: (H, W, 3)
-                colors=colors,  # shape: (H, W, 3)
-                confs=confs,  # shape: (H, W)
-                output_path=ply_path,
-                conf_threshold=np.mean(confs)
+                points=points_first,
+                colors=colors_first,
+                confs=confs_first,
+                output_path=ply_path_first,
+                conf_threshold=np.mean(confs_first)
                 * self.config["Model"]["Pointcloud_Save"]["conf_threshold_coef"],
                 sample_ratio=self.config["Model"]["Pointcloud_Save"]["sample_ratio"],
             )
-
             if self.config["Model"]["save_depth_conf_result"]:
-                predictions = chunk_data
-                predictions.depth *= s
-                self.save_depth_conf_result(predictions, chunk_idx + 1, s, R, t)
+                predictions = chunk_data_first
+                self.save_depth_conf_result(predictions, 0, 1, np.eye(3), np.array([0, 0, 0]))
+        else:
+            for chunk_idx in range(len(self.chunk_indices) - 1):
+                print(f"Applying {chunk_idx+1} -> {chunk_idx} (Total {len(self.chunk_indices)-1})")
+                s, R, t = self.sim3_list[chunk_idx]
+
+                chunk_data = np.load(
+                    os.path.join(self.result_unaligned_dir, f"chunk_{chunk_idx+1}.npy"),
+                    allow_pickle=True,
+                ).item()
+
+                aligned_chunk_data = {}
+
+                aligned_chunk_data["world_points"] = depth_to_point_cloud_optimized_torch(
+                    chunk_data.depth, chunk_data.intrinsics, chunk_data.extrinsics
+                )
+                aligned_chunk_data["world_points"] = apply_sim3_direct_torch(
+                    aligned_chunk_data["world_points"], s, R, t
+                )
+
+                aligned_chunk_data["conf"] = chunk_data.conf
+                aligned_chunk_data["images"] = chunk_data.processed_images
+
+                aligned_path = os.path.join(self.result_aligned_dir, f"chunk_{chunk_idx+1}.npy")
+                np.save(aligned_path, aligned_chunk_data)
+
+                if chunk_idx == 0:
+                    chunk_data_first = np.load(
+                        os.path.join(self.result_unaligned_dir, "chunk_0.npy"), allow_pickle=True
+                    ).item()
+                    np.save(os.path.join(self.result_aligned_dir, "chunk_0.npy"), chunk_data_first)
+                    points_first = depth_to_point_cloud_vectorized(
+                        chunk_data_first.depth,
+                        chunk_data_first.intrinsics,
+                        chunk_data_first.extrinsics,
+                    )
+                    colors_first = chunk_data_first.processed_images
+                    confs_first = chunk_data_first.conf
+                    ply_path_first = os.path.join(self.pcd_dir, "0_pcd.ply")
+                    save_confident_pointcloud_batch(
+                        points=points_first,
+                        colors=colors_first,
+                        confs=confs_first,
+                        output_path=ply_path_first,
+                        conf_threshold=np.mean(confs_first)
+                        * self.config["Model"]["Pointcloud_Save"]["conf_threshold_coef"],
+                        sample_ratio=self.config["Model"]["Pointcloud_Save"]["sample_ratio"],
+                    )
+                    if self.config["Model"]["save_depth_conf_result"]:
+                        predictions = chunk_data_first
+                        self.save_depth_conf_result(predictions, 0, 1, np.eye(3), np.array([0, 0, 0]))
+
+                points = aligned_chunk_data["world_points"].reshape(-1, 3)
+                colors = (aligned_chunk_data["images"].reshape(-1, 3)).astype(np.uint8)
+                confs = aligned_chunk_data["conf"].reshape(-1)
+                ply_path = os.path.join(self.pcd_dir, f"{chunk_idx+1}_pcd.ply")
+                save_confident_pointcloud_batch(
+                    points=points,
+                    colors=colors,
+                    confs=confs,
+                    output_path=ply_path,
+                    conf_threshold=np.mean(confs)
+                    * self.config["Model"]["Pointcloud_Save"]["conf_threshold_coef"],
+                    sample_ratio=self.config["Model"]["Pointcloud_Save"]["sample_ratio"],
+                )
+
+                if self.config["Model"]["save_depth_conf_result"]:
+                    predictions = chunk_data
+                    predictions.depth *= s
+                    self.save_depth_conf_result(predictions, chunk_idx + 1, s, R, t)
 
         self.save_camera_poses()
 
@@ -737,8 +766,11 @@ class DA3_Streaming:
         first_chunk_range, first_chunk_extrinsics = self.all_camera_poses[0]
         _, first_chunk_intrinsics = self.all_camera_intrinsics[0]
 
+        # When there's only 1 chunk, save all poses without excluding overlap
+        first_chunk_end = first_chunk_range[1] if len(self.all_camera_poses) == 1 else first_chunk_range[1] - self.overlap_e
+
         for i, idx in enumerate(
-            range(first_chunk_range[0], first_chunk_range[1] - self.overlap_e)
+            range(first_chunk_range[0], first_chunk_end)
         ):
             w2c = np.eye(4)
             w2c[:3, :] = first_chunk_extrinsics[i]

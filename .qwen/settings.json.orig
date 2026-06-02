@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/gj/Projects/2026.05.30-Depth-Anything-3/facebookresearch_dinov2_main/**)",
+      "Bash(python *)",
+      "Bash(/home/gj/miniconda3/envs/da3/bin/python *)",
+      "Bash(ls *)",
+      "Bash(kill *)"
+    ]
+  },
+  "$version": 4
+}
