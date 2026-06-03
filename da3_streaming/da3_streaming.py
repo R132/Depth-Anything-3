@@ -30,6 +30,7 @@ from loop_utils.alignment_torch import (
     apply_sim3_direct_torch,
     depth_to_point_cloud_optimized_torch,
 )
+from output2colmap import output2colmap
 from loop_utils.config_utils import load_config
 from loop_utils.loop_detector import LoopDetector
 from loop_utils.sim3loop import Sim3LoopOptimizer
@@ -955,5 +956,10 @@ if __name__ == "__main__":
     input_dir = os.path.join(save_dir, "pcd")
     print("Saving all the point clouds")
     merge_ply_files(input_dir, all_ply_path)
+
+    # Convert output to COLMAP format
+    print("Converting to COLMAP format...")
+    output2colmap(save_dir, image_dir)
+
     print("DA3-Streaming done.")
     sys.exit()

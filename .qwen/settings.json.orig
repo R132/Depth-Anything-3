@@ -5,7 +5,11 @@
       "Bash(python *)",
       "Bash(/home/gj/miniconda3/envs/da3/bin/python *)",
       "Bash(ls *)",
-      "Bash(kill *)"
+      "Bash(kill *)",
+      "Bash(true)",
+      "Bash(python3 *)",
+      "Bash(/home/gj/miniconda3/envs/da3/bin/python3 *)",
+      "Bash(cat *)"
     ]
   },
   "$version": 4
