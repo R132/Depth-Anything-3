@@ -10,7 +10,8 @@
       "Bash(python3 *)",
       "Bash(/home/gj/miniconda3/envs/da3/bin/python3 *)",
       "Bash(cat *)",
-      "Bash(xxd *)"
+      "Bash(xxd *)",
+      "Bash(echo *)"
     ]
   },
   "$version": 4
