@@ -16,9 +16,9 @@
 Convert DA3-Streaming output to COLMAP sparse reconstruction format.
 
 COLMAP output structure:
-    <base_path>/sparse/0/cameras.txt
-    <base_path>/sparse/0/images.txt
-    <base_path>/sparse/0/points3D.txt
+    <base_path>/da3_sparse/0/cameras.txt
+    <base_path>/da3_sparse/0/images.txt
+    <base_path>/da3_sparse/0/points3D.txt
 
 Input path inference:
     If input_path is "xxx/images" or "xxx/image", base_path = "xxx"
@@ -26,9 +26,19 @@ Input path inference:
 """
 
 import os
-import re
 import numpy as np
 from pathlib import Path
+
+from colmap_loader import (
+    Camera,
+    Image,
+    Point3D,
+    qvec2rotmat,
+    rotmat2qvec,
+    read_intrinsics_text,
+    read_extrinsics_text,
+    read_points3D_text,
+)
 
 
 def get_base_path(image_dir):
@@ -41,41 +51,6 @@ def get_base_path(image_dir):
     if path.name.lower() in ("images", "image"):
         return str(path.parent)
     return image_dir
-
-
-def matrix_to_quaternion(R):
-    """
-    Convert 3x3 rotation matrix to quaternion (w, x, y, z).
-    Uses the trace-based method for numerical stability.
-    """
-    trace = R[0, 0] + R[1, 1] + R[2, 2]
-
-    if trace > 0:
-        s = 0.5 / np.sqrt(trace + 1.0)
-        w = 0.25 / s
-        x = (R[2, 1] - R[1, 2]) * s
-        y = (R[0, 2] - R[2, 0]) * s
-        z = (R[1, 0] - R[0, 1]) * s
-    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
-        s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
-        w = (R[2, 1] - R[1, 2]) / s
-        x = 0.25 * s
-        y = (R[0, 1] + R[1, 0]) / s
-        z = (R[0, 2] + R[2, 0]) / s
-    elif R[1, 1] > R[2, 2]:
-        s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
-        w = (R[0, 2] - R[2, 0]) / s
-        x = (R[0, 1] + R[1, 0]) / s
-        y = 0.25 * s
-        z = (R[1, 2] + R[2, 1]) / s
-    else:
-        s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
-        w = (R[1, 0] - R[0, 1]) / s
-        x = (R[0, 2] + R[2, 0]) / s
-        y = (R[1, 2] + R[2, 1]) / s
-        z = 0.25 * s
-
-    return np.array([w, x, y, z])
 
 
 def read_camera_poses(poses_path):
@@ -175,206 +150,112 @@ def read_ply_pointcloud(ply_path):
     return points
 
 
+# --- Read COLMAP output files (using colmap_loader) ---
+
+
+def read_colmap_cameras(cameras_path):
+    """Read COLMAP cameras.txt using colmap_loader."""
+    return read_intrinsics_text(cameras_path)
+
+
+def read_colmap_images(images_path):
+    """Read COLMAP images.txt using colmap_loader."""
+    return read_extrinsics_text(images_path)
+
+
+def read_colmap_points3D(points3d_path):
+    """Read COLMAP points3D.txt using colmap_loader."""
+    xyzs, rgbs, errors = read_points3D_text(points3d_path)
+    points = {}
+    for i in range(len(xyzs)):
+        points[i + 1] = Point3D(
+            id=i + 1, xyz=xyzs[i], rgb=rgbs[i], error=errors[i],
+            image_ids=np.array([]), point2D_idxs=np.array([])
+        )
+    return points
+
+
+# --- Write COLMAP output files ---
+
+
 def write_cameras_txt(cameras_path, intrinsics, width, height):
     """
-    Write COLMAP cameras.txt file.
+    Write COLMAP cameras.txt in PINHOLE model format.
+    PINHOLE model params: [fx, fy, cx, cy]
 
-    Format:
-        # Camera list with one line of data per camera:
-        #   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]
-        # Number of cameras: N
-        1 PINHOLE W H fx fy cx cy
+    Format: CAMERA_ID MODEL WIDTH HEIGHT PARAMS[]
     """
-    # Assume single camera model (use first frame's intrinsics)
-    fx, fy, cx, cy = intrinsics[0]
-
     with open(cameras_path, "w") as f:
         f.write("# Camera list with one line of data per camera:\n")
         f.write("#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n")
         f.write(f"# Number of cameras: {len(intrinsics)}\n")
-        f.write(f"1 PINHOLE {width} {height} {fx} {fy} {cx} {cy}\n")
+        for i, (fx, fy, cx, cy) in enumerate(intrinsics, 1):
+            f.write(f"{i} PINHOLE {width} {height} {fx} {fy} {cx} {cy}\n")
+    print(f"  Cameras: {len(intrinsics)} cameras written to {cameras_path}")
 
 
 def write_images_txt(images_path, poses, image_names):
     """
-    Write COLMAP images.txt file.
+    Write COLMAP images.txt.
 
-    COLMAP stores WORLD-TO-CAMERA (W2C) pose in images.txt:
-        IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME
-        <empty line for 2D observations>
+    Input poses are C2W (camera-to-world) 4x4 matrices.
+    COLMAP convention is W2C (world-to-camera):
+        R_w2c = R_c2w.T
+        t_w2c = -R_c2c.T @ t_c2w
 
-    Input poses are CAMERA-TO-WORLD (C2W), so we must invert them.
+    Format per image (two lines):
+        IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME
+        POINTS2D[] as (X, Y, POINT3D_ID)
     """
+    num_images = min(len(poses), len(image_names))
     with open(images_path, "w") as f:
         f.write("# Image list with two lines of data per image:\n")
         f.write("#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n")
         f.write("#   POINTS2D[] as (X, Y, POINT3D_ID)\n")
-        f.write(f"# Number of images: {len(poses)}, mean observations per image: 0\n")
+        f.write(f"# Number of images: {num_images}, mean observations per image: 0\n")
+        for i in range(num_images):
+            c2w = poses[i]
+            R_c2w = c2w[:3, :3]
+            t_c2w = c2w[:3, 3]
 
-        for idx, (pose, name) in enumerate(zip(poses, image_names), start=1):
-            # Input pose is C2W, COLMAP needs W2C
-            w2c = np.linalg.inv(pose)
+            # Convert C2W to W2C
+            R_w2c = R_c2w.T
+            t_w2c = -R_w2c @ t_c2w
 
-            # Extract rotation and translation from W2C matrix
-            R = w2c[:3, :3]
-            T = w2c[:3, 3]
+            # Convert rotation matrix to quaternion (w, x, y, z)
+            qvec = rotmat2qvec(R_w2c)
 
-            # Convert rotation matrix to quaternion
-            qw, qx, qy, qz = matrix_to_quaternion(R)
-
-            # Normalize quaternion
-            qnorm = np.sqrt(qw**2 + qx**2 + qy**2 + qz**2)
-            qw, qx, qy, qz = qw / qnorm, qx / qnorm, qy / qnorm, qz / qnorm
-
-            # Write image header line
-            f.write(f"{idx} {qw} {qx} {qy} {qz} {T[0]} {T[1]} {T[2]} 1 {name}\n")
-
-            # Write empty 2D observations line
+            image_id = i + 1
+            name = image_names[i]
+            f.write(
+                f"{image_id} "
+                f"{qvec[0]} {qvec[1]} {qvec[2]} {qvec[3]} "
+                f"{t_w2c[0]} {t_w2c[1]} {t_w2c[2]} "
+                f"1 {name}\n"
+            )
+            # Empty points2D line (no 2D observations tracked)
             f.write("\n")
+    print(f"  Images: {num_images} images written to {images_path}")
 
 
 def write_points3D_txt(points3d_path, points):
     """
-    Write COLMAP points3D.txt file.
+    Write COLMAP points3D.txt.
 
-    Format:
-        POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)
+    Format: POINT3D_ID X Y Z R G B ERROR TRACK[] as (IMAGE_ID, POINT2D_IDX)
+
+    Args:
+        points: numpy array of shape (N, 6) with columns [x, y, z, r, g, b]
     """
     with open(points3d_path, "w") as f:
         f.write("# 3D point list with one line of data per point:\n")
         f.write("#   POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)\n")
         f.write(f"# Number of points: {len(points)}, mean track length: 0\n")
-
-        for idx, point in enumerate(points, start=1):
-            x, y, z = point[0], point[1], point[2]
-            r, g, b = int(point[3]), int(point[4]), int(point[5])
-            # ERROR=0, no track data - no trailing space!
-            f.write(f"{idx} {x} {y} {z} {r} {g} {b} 0\n")
-
-
-# =============================================================================
-# COLMAP Output Reader — for verification and round-trip checking
-# =============================================================================
-
-def read_colmap_cameras(path):
-    """
-    Read COLMAP cameras.txt file.
-    Returns dict: {camera_id: {model, width, height, params}}
-    """
-    cameras = {}
-    with open(path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split()
-            camera_id = int(parts[0])
-            model = parts[1]
-            width = int(parts[2])
-            height = int(parts[3])
-            params = [float(x) for x in parts[4:]]
-            cameras[camera_id] = {
-                "model": model,
-                "width": width,
-                "height": height,
-                "params": params,
-            }
-    return cameras
-
-
-def read_colmap_images(path):
-    """
-    Read COLMAP images.txt file.
-    Returns dict: {image_id: {qvec, tvec, camera_id, name}}
-
-    Note: COLMAP stores WORLD-TO-CAMERA pose (qvec, tvec).
-    To get camera position in world coordinates (C2W translation):
-        camera_center = -R^T @ tvec
-    """
-    images = {}
-    with open(path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split()
-            if len(parts) >= 9:
-                image_id = int(parts[0])
-                qw, qx, qy, qz = (
-                    float(parts[1]),
-                    float(parts[2]),
-                    float(parts[3]),
-                    float(parts[4]),
-                )
-                tx, ty, tz = (
-                    float(parts[5]),
-                    float(parts[6]),
-                    float(parts[7]),
-                )
-                camera_id = int(parts[8])
-                name = parts[9] if len(parts) > 9 else ""
-                images[image_id] = {
-                    "qvec": np.array([qw, qx, qy, qz]),
-                    "tvec": np.array([tx, ty, tz]),
-                    "camera_id": camera_id,
-                    "name": name,
-                }
-            # Skip the next line (2D observations)
-            f.readline()
-    return images
-
-
-def read_colmap_points3D(path):
-    """
-    Read COLMAP points3D.txt file.
-    Returns dict: {point_id: {xyz, rgb, error, track}}
-    """
-    points = {}
-    with open(path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split()
-            if len(parts) >= 8:
-                point_id = int(parts[0])
-                xyz = np.array([float(parts[1]), float(parts[2]), float(parts[3])])
-                rgb = np.array([int(parts[4]), int(parts[5]), int(parts[6])])
-                error = float(parts[7])
-                track = []
-                for i in range(8, len(parts) - 1, 2):
-                    track.append((int(parts[i]), int(parts[i + 1])))
-                points[point_id] = {
-                    "xyz": xyz,
-                    "rgb": rgb,
-                    "error": error,
-                    "track": track,
-                }
-    return points
-
-
-def qvec_to_rotmat(qvec):
-    """Convert quaternion (w, x, y, z) to 3x3 rotation matrix."""
-    qw, qx, qy, qz = qvec
-    return np.array(
-        [
-            [
-                1 - 2 * qy**2 - 2 * qz**2,
-                2 * qx * qy - 2 * qz * qw,
-                2 * qx * qz + 2 * qy * qw,
-            ],
-            [
-                2 * qx * qy + 2 * qz * qw,
-                1 - 2 * qx**2 - 2 * qz**2,
-                2 * qy * qz - 2 * qx * qw,
-            ],
-            [
-                2 * qx * qz - 2 * qy * qw,
-                2 * qy * qz + 2 * qx * qw,
-                1 - 2 * qx**2 - 2 * qy**2,
-            ],
-        ]
-    )
+        for i in range(len(points)):
+            x, y, z = points[i, 0], points[i, 1], points[i, 2]
+            r, g, b = int(points[i, 3]), int(points[i, 4]), int(points[i, 5])
+            f.write(f"{i + 1} {x} {y} {z} {r} {g} {b} 0\n")
+    print(f"  Points3D: {len(points)} points written to {points3d_path}")
 
 
 def verify_colmap_output(sparse_dir):
@@ -413,22 +294,22 @@ def verify_colmap_output(sparse_dir):
     # 2. Check camera IDs
     camera_ids = set(cameras.keys())
     for img_id, img_data in images.items():
-        if img_data["camera_id"] not in camera_ids:
+        if img_data.camera_id not in camera_ids:
             errors.append(
-                f"Image {img_id} ({img_data['name']}) references "
-                f"non-existent camera_id={img_data['camera_id']}"
+                f"Image {img_id} ({img_data.name}) references "
+                f"non-existent camera_id={img_data.camera_id}"
             )
 
     # 3. Check quaternion normalization and rotation validity
     bad_qvecs = 0
     bad_rots = 0
     for img_id, img_data in images.items():
-        qvec = img_data["qvec"]
+        qvec = img_data.qvec
         qnorm = np.linalg.norm(qvec)
         if abs(qnorm - 1.0) > 1e-6:
             bad_qvecs += 1
 
-        R = qvec_to_rotmat(qvec)
+        R = qvec2rotmat(qvec)
         det = np.linalg.det(R)
         if abs(det - 1.0) > 1e-5:
             bad_rots += 1
@@ -441,8 +322,8 @@ def verify_colmap_output(sparse_dir):
     # 4. Check camera positions for NaN/Inf
     nan_positions = 0
     for img_id, img_data in images.items():
-        tvec = img_data["tvec"]
-        R = qvec_to_rotmat(img_data["qvec"])
+        tvec = img_data.tvec
+        R = qvec2rotmat(img_data.qvec)
         camera_center = -R.T @ tvec  # W2C -> camera position in world coords
         if np.any(np.isnan(camera_center)) or np.any(np.isinf(camera_center)):
             nan_positions += 1
@@ -453,7 +334,7 @@ def verify_colmap_output(sparse_dir):
     # 5. Check 3D points
     nan_points = 0
     for pt_id, pt_data in points3d.items():
-        if np.any(np.isnan(pt_data["xyz"])) or np.any(np.isinf(pt_data["xyz"])):
+        if np.any(np.isnan(pt_data.xyz)) or np.any(np.isinf(pt_data.xyz)):
             nan_points += 1
 
     if nan_points > 0:
@@ -488,7 +369,7 @@ def output2colmap(output_dir, image_dir):
     """
     # Infer base path
     base_path = get_base_path(image_dir)
-    sparse_dir = os.path.join(base_path, "sparse", "0")
+    sparse_dir = os.path.join(base_path, "da3_sparse", "0")
     os.makedirs(sparse_dir, exist_ok=True)
 
     # Read input files
@@ -542,7 +423,6 @@ def output2colmap(output_dir, image_dir):
     if os.path.exists(pcd_path):
         points = read_ply_pointcloud(pcd_path)
         write_points3D_txt(points3d_path, points)
-        print(f"  Points3D: {len(points)} points written to {points3d_path}")
     else:
         # Create empty points3D.txt
         with open(points3d_path, "w") as f:
