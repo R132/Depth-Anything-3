@@ -11,7 +11,10 @@
       "Bash(/home/gj/miniconda3/envs/da3/bin/python3 *)",
       "Bash(cat *)",
       "Bash(xxd *)",
-      "Bash(echo *)"
+      "Bash(echo *)",
+      "Read(//home/gj/data/DevData/2026.05.11-Waving_hand/sparse/0/**)",
+      "Read(//home/gj/data/DevData/2026.05.11-Waving_hand/colmap_sparse/0/**)",
+      "Read(//home/gj/data/DevData/2026.05.11-Waving_hand/da3_sparse/0/**)"
     ]
   },
   "$version": 4

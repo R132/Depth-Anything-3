@@ -40,6 +40,7 @@ if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
 from colmap_loader import (
+    Image,
     qvec2rotmat,
     read_extrinsics_binary,
     read_intrinsics_binary,
@@ -128,103 +129,79 @@ def compute_scale_factor(da3_dir, colmap_dir):
     return scale
 
 
-def scale_colmap_output(src_dir, dst_dir, scale_factor):
+def scale_colmap_output(src_dir, dst_dir, s):
     """
-    Scale a COLMAP reconstruction by a given factor.
+    Scale a COLMAP reconstruction to match DA3's metric scale.
 
-    Uses colmap_loader to read binary files (authoritative source),
-    then writes scaled txt output and a CloudCompare-compatible PLY.
-
-    Only changes: camera tvec, point XYZ. Everything else preserved.
+    s = da3_distance / colmap_distance (shrink factor, s < 1).
+    Only changes: camera tvec *= s, point xyz *= s.
+    Everything else preserved unchanged, output in same binary format as input.
     """
     os.makedirs(dst_dir, exist_ok=True)
 
-    # ---- Read COLMAP data via colmap_loader ----
-    cameras = read_intrinsics_binary(os.path.join(src_dir, "cameras.bin"))
+    # Copy unchanged files: cameras.bin (intrinsics unchanged), project.ini
+    shutil.copy2(os.path.join(src_dir, "cameras.bin"), dst_dir)
+    project_ini = os.path.join(src_dir, "project.ini")
+    if os.path.exists(project_ini):
+        shutil.copy2(project_ini, dst_dir)
+
+    # ---- Scale images: only tvec changes ----
     images = read_extrinsics_binary(os.path.join(src_dir, "images.bin"))
-    # read_points3D_binary returns (xyzs, rgbs, errors) but not IDs or track data
-    # We need IDs and tracks for txt output, so read manually
+    scaled_images = {}
+    for img_id, img in images.items():
+        scaled_images[img_id] = Image(
+            id=img.id, qvec=img.qvec, tvec=img.tvec * s,
+            camera_id=img.camera_id, name=img.name,
+            xys=img.xys, point3D_ids=img.point3D_ids,
+        )
+    _write_extrinsics_binary(os.path.join(dst_dir, "images.bin"), scaled_images)
+
+    # ---- Scale points: only xyz changes ----
     point_ids, xyzs, rgbs, errors, tracks = _read_points3D_full(
         os.path.join(src_dir, "points3D.bin")
     )
-
-    # ---- Write scaled cameras.txt ----
-    with open(os.path.join(dst_dir, "cameras.txt"), "w") as f:
-        f.write("# Camera list with one line of data per camera:\n")
-        f.write("#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n")
-        f.write(f"# Number of cameras: {len(cameras)}\n")
-        for cid, cam in sorted(cameras.items()):
-            sp = list(cam.params)
-            if cam.model == "PINHOLE":
-                # fx, fy, cx, cy
-                sp = [x * scale_factor for x in sp]
-            else:
-                # Scale focal length only
-                sp[0] *= scale_factor
-            params_str = " ".join(f"{x}" for x in sp)
-            f.write(f"{cid} {cam.model} {cam.width} {cam.height} {params_str}\n")
-
-    # ---- Write scaled images.txt ----
-    with open(os.path.join(dst_dir, "images.txt"), "w") as f:
-        f.write("# Image list with two lines of data per image:\n")
-        f.write("#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n")
-        f.write("#   POINTS2D[] as (X, Y, POINT3D_ID)\n")
-        f.write(f"# Number of images: {len(images)}, mean observations per image: 0\n")
-        for img_id in sorted(images.keys()):
-            img = images[img_id]
-            tvec_s = img.tvec * scale_factor
-            f.write(
-                f"{img_id} {img.qvec[0]} {img.qvec[1]} {img.qvec[2]} {img.qvec[3]} "
-                f"{tvec_s[0]} {tvec_s[1]} {tvec_s[2]} {img.camera_id} {img.name}\n"
-            )
-            # Write 2D observations: X Y POINT3D_ID (COLMAP text format)
-            obs = []
-            for j in range(len(img.xys)):
-                x, y = img.xys[j]
-                p3d_id = img.point3D_ids[j]
-                obs.append(f"{x} {y} {p3d_id}")
-            f.write(" ".join(obs) + "\n")
-
-    # ---- Write scaled points3D.txt ----
-    num_points = len(point_ids)
-    with open(os.path.join(dst_dir, "points3D.txt"), "w") as f:
-        f.write("# 3D point list with one line of data per point:\n")
-        f.write("#   POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)\n")
-        # Compute mean track length for header
-        total_tracks = sum(len(tr) for tr in tracks)
-        mean_track = total_tracks / num_points if num_points > 0 else 0
-        f.write(f"# Number of points: {num_points}, mean track length: {mean_track:.4f}\n")
-        for i in range(num_points):
-            pid = point_ids[i]
-            xyz_s = xyzs[i] * scale_factor
-            rgb = rgbs[i]
-            err = errors[i, 0] if errors.ndim > 1 else errors[i]
-            track = " ".join(f"{t[0]} {t[1]}" for t in tracks[i])
-            f.write(
-                f"{pid} {xyz_s[0]} {xyz_s[1]} {xyz_s[2]} "
-                f"{rgb[0]} {rgb[1]} {rgb[2]} {err} {track}\n"
-            )
+    xyzs *= s
+    _write_points3D_binary(
+        os.path.join(dst_dir, "points3D.bin"), point_ids, xyzs, rgbs, errors, tracks
+    )
 
     print(f"  Scaled COLMAP output written to {dst_dir}")
-    print(f"  Points: {num_points}, Cameras: {len(cameras)}, Images: {len(images)}")
+    print(f"  Points: {len(point_ids)}, Cameras: {len(images)}, Images: {len(images)}")
+    print(f"  Scale (shrink factor): {s:.6f}")
 
-    # ---- Export simple point cloud for CloudCompare (ASCII PLY) ----
-    pcd_path = os.path.join(dst_dir, "point_cloud.ply")
-    with open(pcd_path, "w") as f:
-        f.write("ply\n")
-        f.write("format ascii 1.0\n")
-        f.write(f"element vertex {num_points}\n")
-        f.write("property float x\n")
-        f.write("property float y\n")
-        f.write("property float z\n")
-        f.write("property uchar red\n")
-        f.write("property uchar green\n")
-        f.write("property uchar blue\n")
-        f.write("end_header\n")
-        for i in range(num_points):
-            xyz_s = xyzs[i] * scale_factor
-            f.write(f"{xyz_s[0]} {xyz_s[1]} {xyz_s[2]} {rgbs[i][0]} {rgbs[i][1]} {rgbs[i][2]}\n")
-    print(f"  Point cloud exported to {pcd_path}")
+
+def _write_extrinsics_binary(path, images):
+    """Write COLMAP images.bin (mirrors read_extrinsics_binary format)."""
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(images)))
+        for img_id in sorted(images.keys()):
+            img = images[img_id]
+            f.write(struct.pack("<idddddddi",
+                                img.id,
+                                img.qvec[0], img.qvec[1], img.qvec[2], img.qvec[3],
+                                img.tvec[0], img.tvec[1], img.tvec[2],
+                                img.camera_id))
+            f.write(img.name.encode("utf-8") + b"\x00")
+            f.write(struct.pack("<Q", len(img.xys)))
+            for j in range(len(img.xys)):
+                f.write(struct.pack("<ddq",
+                                    float(img.xys[j][0]), float(img.xys[j][1]),
+                                    int(img.point3D_ids[j])))
+
+
+def _write_points3D_binary(path, point_ids, xyzs, rgbs, errors, tracks):
+    """Write COLMAP points3D.bin (mirrors _read_points3D_full format)."""
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(point_ids)))
+        for i in range(len(point_ids)):
+            f.write(struct.pack("<Q", point_ids[i]))
+            f.write(struct.pack("<3d", xyzs[i][0], xyzs[i][1], xyzs[i][2]))
+            f.write(struct.pack("<3B", int(rgbs[i][0]), int(rgbs[i][1]), int(rgbs[i][2])))
+            err_val = float(errors[i, 0] if errors.ndim > 1 else errors[i])
+            f.write(struct.pack("<d", err_val))
+            f.write(struct.pack("<Q", len(tracks[i])))
+            for img_id, pt2d_idx in tracks[i]:
+                f.write(struct.pack("<II", img_id, pt2d_idx))
 
 
 def _read_points3D_full(path):
@@ -322,8 +299,9 @@ def run_scale_alignment(base_path):
         print("No COLMAP output found. Skipping scale alignment.")
         return
 
-    # Compute scale factor
+    # Compute scale factor (colmap/da3 ratio) and shrink factor (da3/colmap)
     scale = compute_scale_factor(da3_sparse_dir, colmap_sparse_dir)
+    s = 1.0 / scale
 
     # Backup original COLMAP output
     if os.path.exists(colmap_backup_dir):
@@ -333,14 +311,14 @@ def run_scale_alignment(base_path):
     print(f"  Original COLMAP output moved to: {colmap_backup_dir}")
 
     # Write scaled COLMAP output to sparse/0
-    scale_colmap_output(colmap_backup_dir, final_sparse_dir, scale)
+    scale_colmap_output(colmap_backup_dir, final_sparse_dir, s)
 
     print(f"\n✅ Pipeline complete!")
     print(f"  DA3 output:      {os.path.dirname(os.path.dirname(da3_sparse_dir))}")
     print(f"  DA3 COLMAP:      {da3_sparse_dir}")
     print(f"  COLMAP (orig):   {colmap_backup_dir}")
     print(f"  COLMAP (scaled): {final_sparse_dir}")
-    print(f"  Scale factor:    {scale:.6f}")
+    print(f"  Scale factor (colmap/da3): {scale:.6f}, shrink factor s = {s:.6f}")
 
 
 def run_pipeline(image_dir, output_dir, config_path, run_colmap=True):
