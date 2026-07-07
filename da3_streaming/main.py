@@ -33,6 +33,8 @@ import subprocess
 import sys
 from datetime import datetime
 
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm", ".m4v"}
+
 import numpy as np
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -321,12 +323,47 @@ def run_scale_alignment(base_path):
     print(f"  Scale factor (colmap/da3): {scale:.6f}, shrink factor s = {s:.6f}")
 
 
+def extract_frames_if_needed(image_dir, fps=5):
+    """If <image_dir>/images exists, skip. Otherwise find the first video
+    file in <image_dir>, extract frames via ffmpeg to <image_dir>/images,
+    and return the images directory path. Raises SystemExit if no video
+    is found."""
+    images_dir = os.path.join(image_dir, "images")
+    if os.path.isdir(images_dir) and os.listdir(images_dir):
+        print(f"  Images directory already exists: {images_dir} — skipping extraction.")
+        return images_dir
+
+    video_files = [
+        f for f in os.listdir(image_dir)
+        if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS
+    ]
+    if not video_files:
+        print(f"  ERROR: No images directory and no video files found in {image_dir}")
+        sys.exit(1)
+
+    video_path = os.path.join(image_dir, video_files[0])
+    print(f"  Extracting frames from {video_path} at {fps} fps → {images_dir}")
+    os.makedirs(images_dir, exist_ok=True)
+
+    cmd = [
+        "ffmpeg", "-i", video_path,
+        "-vf", f"fps={fps}",
+        os.path.join(images_dir, "frame_%06d.jpg"),
+    ]
+    subprocess.run(cmd, check=True)
+    print(f"  Frames extracted to {images_dir}")
+    return images_dir
+
+
 def run_pipeline(image_dir, output_dir, config_path, run_colmap=True):
     """
     Run the full pipeline. Each heavy step runs in a separate process
     to avoid memory accumulation.
     """
     base_path = get_base_path(image_dir)
+
+    # Step 0: Ensure images are available (extract from video if needed)
+    image_dir = extract_frames_if_needed(base_path)
 
     # Step 1: DA3-Streaming (separate process)
     run_da3_streaming(image_dir, output_dir, config_path)
